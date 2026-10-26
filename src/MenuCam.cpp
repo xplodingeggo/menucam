@@ -9,7 +9,7 @@
 #include <iomanip>
 #include <sstream>
 
-BAKKESMOD_PLUGIN(MenuCam, "Menu Camera Logger", "1.0", PLUGINTYPE_FREEPLAY)
+BAKKESMOD_PLUGIN(MenuCam, "Menu Camera Logger", "1.2", PLUGINTYPE_FREEPLAY)
 
 namespace {
 
@@ -19,37 +19,46 @@ float Degrees(int rotator) {
     return rotator / kRotatorPerDegree;
 }
 
-bool SamePov(const POV& a, const POV& b) {
-    return a.location.X == b.location.X && a.location.Y == b.location.Y &&
-           a.location.Z == b.location.Z && a.rotation.Pitch == b.rotation.Pitch &&
-           a.rotation.Yaw == b.rotation.Yaw && a.rotation.Roll == b.rotation.Roll &&
-           a.FOV == b.FOV;
-}
+// The home screen camera orbits the player's car. It isn't in the menu file,
+// so Hebnix can't change it.
+constexpr const char* kHomeKey = "home";
+constexpr const char* kPlayMenuCamera = "CameraActor_2";
 
-// Places the live preview is applied after the game sets the camera. Which of
-// these fire in the menus isn't known, so all are tried and counted (see the
-// Preview check panel). Hooks that never fire cost nothing.
-const char* kUpdateHooks[] = {
-    "Function Engine.Camera.UpdateCamera",
-    "Function Engine.Camera.UpdateViewTarget",
-    "Function TAGame.CameraState_CarPreview_TA.UpdatePOV",
-    "Function TAGame.CameraState_TA.UpdatePOV",
-    "Function ProjectX.CameraState_X.UpdatePOV",
-    "Function Engine.PlayerController.GetPlayerViewPoint",
-    "Function Engine.PlayerController.PlayerTick",
-    "Function TAGame.PlayerController_TA.PlayerTick",
-};
-constexpr size_t kHookCount = sizeof(kUpdateHooks) / sizeof(kUpdateHooks[0]);
+// Runs while the home screen camera shows. Offsets are applied here as well
+// as on the viewport tick.
+constexpr const char* kHomeCameraHook = "Function TAGame.CameraState_CarPreview_TA.UpdatePOV";
+constexpr const char* kViewportTick = "Function Engine.GameViewportClient.Tick";
 
 // Functions the home-screen cars run, used to move each car from inside its
-// own call. Tick should fire every frame; the others are counted in case it
-// doesn't.
+// own call. Tick fires every frame; the other is counted in case it stops.
 const char* kCarHooks[] = {
     "Function TAGame.CarPreviewActor_TA.Tick",
     "Function TAGame.CarPreviewActor_TA.UpdateBoostGlow",
-    "Function TAGame.CarPreviewActor_TA.AnimateBody",
 };
 constexpr size_t kCarHookCount = sizeof(kCarHooks) / sizeof(kCarHooks[0]);
+
+// The player's spot in MENU_Main_p (2026-10 build). Party spots fan out from
+// it, and the line-up turns around it, as in Hebnix.
+const Vector kPlayerCarSpot{-1345.9f, -1587.4f, 0.0f};
+
+bool IsHomeCamera(const std::string& state) {
+    return state.find("CarPreview") != std::string::npos;
+}
+
+bool IsFixedCamera(const std::string& state) {
+    return state.find("MenuCamActor") != std::string::npos;
+}
+
+std::string JsonString(const std::string& text) {
+    std::string out = "\"";
+    for (char ch : text) {
+        if (ch == '"' || ch == '\\') {
+            out += '\\';
+        }
+        out += ch;
+    }
+    return out + "\"";
+}
 
 bool SameSpot(const Vector& a, const Rotator& ar, const Vector& b, const Rotator& br) {
     return a.X == b.X && a.Y == b.Y && a.Z == b.Z && ar.Pitch == br.Pitch && ar.Yaw == br.Yaw &&
@@ -92,37 +101,41 @@ const KnownCamera* MatchCamera(const Vector& at) {
     return nullptr;
 }
 
-// A live preview value: a slider, plus a box for typing an exact number. The
-// box accepts values past the slider's range.
-struct Slider {
-    const char* cvar;
-    const char* label;
-    float min;
-    float max;
-    // Above 1, the slider is finer near zero so small moves stay easy on a
-    // big range.
-    float power = 1.0f;
-};
+const KnownCamera* FindCamera(const std::string& name) {
+    for (const auto& camera : kKnownCameras) {
+        if (name == camera.name) {
+            return &camera;
+        }
+    }
+    return nullptr;
+}
+
+// "CameraActor_3 (GoalExplosionRevealEnd)", or just the name when untagged.
+std::string CameraLabel(const std::string& name) {
+    const KnownCamera* camera = FindCamera(name);
+    return camera && *camera->tag ? name + " (" + camera->tag + ")" : name;
+}
 
 // Distances reach the far ends of big custom maps.
 constexpr float kMaxMove = 100000.0f;
+// Above 1, the slider is finer near zero so small moves stay easy on a big
+// range.
 constexpr float kMovePower = 4.0f;
 
-void SliderRow(CVarWrapper cvar, const Slider& slider) {
-    float value = cvar.getFloatValue();
+// A slider, plus a box for typing an exact number. The box accepts values
+// past the slider's range.
+bool SliderRow(const char* id, const char* label, float* value, float min, float max, float power = 1.0f) {
     float width = ImGui::GetContentRegionAvail().x;
-    ImGui::PushID(slider.cvar);
+    ImGui::PushID(id);
     ImGui::SetNextItemWidth(width * 0.55f);
-    bool changed = ImGui::SliderFloat("##slider", &value, slider.min, slider.max, "%.1f", slider.power);
+    bool changed = ImGui::SliderFloat("##slider", value, min, max, "%.1f", power);
     ImGui::SameLine();
     ImGui::SetNextItemWidth(width * 0.2f);
-    changed |= ImGui::InputFloat("##box", &value, 0.0f, 0.0f, "%.1f");
+    changed |= ImGui::InputFloat("##box", value, 0.0f, 0.0f, "%.1f");
     ImGui::SameLine();
-    ImGui::TextUnformatted(slider.label);
+    ImGui::TextUnformatted(label);
     ImGui::PopID();
-    if (changed) {
-        cvar.setValue(value);
-    }
+    return changed;
 }
 
 std::string Timestamp() {
@@ -140,21 +153,14 @@ void MenuCam::onLoad() {
     dir = gameWrapper->GetDataFolder() / "menucam";
     std::filesystem::create_directories(dir);
     LoadNames();
+    LoadOffsets();
 
     cvarManager->registerCvar("menucam_overlay", "1", "Show the current menu camera on screen", true, true, 0, true, 1);
-    cvarManager->registerCvar("menucam_live", "0", "Apply the offsets below to the camera live", true, true, 0, true, 1, false);
-    for (const char* axis : {"menucam_x", "menucam_y", "menucam_z"}) {
-        cvarManager->registerCvar(axis, "0", "Camera offset (Unreal units)", true, false, 0, false, 0, false);
-    }
-    cvarManager->registerCvar("menucam_pitch", "0", "Tilt offset (degrees)", true, true, -89, true, 89, false);
-    cvarManager->registerCvar("menucam_yaw", "0", "Turn offset (degrees)", true, true, -180, true, 180, false);
-    cvarManager->registerCvar("menucam_method", "0", "Live preview method: 0 shake offsets, 1 overwrite view", true, true, 0, true, 1, false);
     cvarManager->registerCvar("menucam_car_live", "0", "Move the home screen cars live", true, true, 0, true, 1, false);
     for (const char* axis : {"menucam_car_x", "menucam_car_y", "menucam_car_z"}) {
         cvarManager->registerCvar(axis, "0", "Car offset (Unreal units)", true, false, 0, false, 0, false);
     }
     cvarManager->registerCvar("menucam_car_yaw", "0", "Car turn (degrees)", true, true, -180, true, 180, false);
-    cvarManager->registerCvar("menucam_fov", "0", "Field of view override, 0 keeps the game's", true, true, 0, true, 170, false);
 
     cvarManager->registerNotifier("menucam_mark", [this](std::vector<std::string> args) {
         std::string note;
@@ -177,22 +183,21 @@ void MenuCam::onLoad() {
         SaveName(label);
     }, "Give the current camera a name: menucam_name Home screen", PERMISSION_ALL);
 
-    hookFires.assign(kHookCount + 1, 0);
-    gameWrapper->HookEvent("Function Engine.GameViewportClient.Tick", [this](std::string) {
-        ++hookFires[kHookCount];
+    cvarManager->registerNotifier("menucam_export", [this](std::vector<std::string>) { ExportForHebnix(); },
+                                  "Save the car and fixed camera offsets for Hebnix's Import MenuCam values button",
+                                  PERMISSION_ALL);
+
+    gameWrapper->HookEvent(kViewportTick, [this](std::string) {
+        ++frame;
         OnTick();
-        OnCameraUpdated();
+        ApplyCameraOffsets();
         PickPivotCar();
-        if (hookFires[kHookCount] % 120 == 0) {
+        if (frame % 120 == 0) {
             WriteDiagnostics();
+            SaveOffsets();
         }
     });
-    for (size_t i = 0; i < kHookCount; ++i) {
-        gameWrapper->HookEventPost(kUpdateHooks[i], [this, i](std::string) {
-            ++hookFires[i];
-            OnCameraUpdated();
-        });
-    }
+    gameWrapper->HookEventPost(kHomeCameraHook, [this](std::string) { ApplyCameraOffsets(); });
     carHookFires.assign(kCarHookCount, 0);
     for (size_t i = 0; i < kCarHookCount; ++i) {
         gameWrapper->HookEventWithCallerPost<ActorWrapper>(kCarHooks[i], [this, i](ActorWrapper car, void*, std::string) {
@@ -200,27 +205,22 @@ void MenuCam::onLoad() {
             OnCarTick(car);
         });
     }
-    cvarManager->registerNotifier("menucam_hooks", [this](std::vector<std::string>) {
-        for (size_t i = 0; i < kHookCount; ++i) {
-            cvarManager->log("menucam: " + std::to_string(hookFires[i]) + "  " + kUpdateHooks[i]);
-        }
-        cvarManager->log("menucam: " + std::to_string(hookFires[kHookCount]) + "  viewport tick");
-        cvarManager->log("menucam: preview kept " + std::to_string(previewKept) + ", overwritten " +
-                         std::to_string(previewLost));
-    }, "Show which camera hooks fire and whether the preview sticks", PERMISSION_ALL);
     gameWrapper->RegisterDrawable([this](CanvasWrapper canvas) { Draw(canvas); });
 
     cvarManager->log("menucam: loaded, writing to " + dir.string());
 }
 
 void MenuCam::onUnload() {
-    for (const char* hook : kUpdateHooks) {
-        gameWrapper->UnhookEventPost(hook);
-    }
+    gameWrapper->UnhookEvent(kViewportTick);
+    gameWrapper->UnhookEventPost(kHomeCameraHook);
     for (const char* hook : kCarHooks) {
         gameWrapper->UnhookEventPost(hook);
     }
-    gameWrapper->UnhookEvent("Function Engine.GameViewportClient.Tick");
+    CameraWrapper camera = gameWrapper->GetCamera();
+    if (!camera.IsNull()) {
+        ClearShake(camera);
+    }
+    SaveOffsets();
 }
 
 std::optional<CamReading> MenuCam::Read() {
@@ -232,13 +232,18 @@ std::optional<CamReading> MenuCam::Read() {
     r.focus = camera.GetFocusActor();
     r.state = camera.GetCameraState();
     POV pov = camera.GetPOV();
-    // Report what the game chose, not our own live tweak.
-    if (lastWritten && lastBase && SamePov(pov, *lastWritten)) {
-        pov = *lastBase;
-    }
     r.location = pov.location;
     r.rotation = pov.rotation;
     r.fov = pov.FOV;
+    // Report what the game chose, not our own offsets.
+    if (shakeSet) {
+        Vector move = camera.GetShakeLocationOffset();
+        Rotator turn = camera.GetShakeRotationOffset();
+        r.location = Vector{r.location.X - move.X, r.location.Y - move.Y, r.location.Z - move.Z};
+        r.rotation.Pitch -= turn.Pitch;
+        r.rotation.Yaw -= turn.Yaw;
+        r.fov -= camera.GetShakeFOVOffset();
+    }
     return r;
 }
 
@@ -248,7 +253,7 @@ std::string MenuCam::KeyOf(const CamReading& r) const {
     }
     // Fixed cameras stand still; anything else (the car orbit on the home
     // screen) moves every frame, so it is told apart by its state only.
-    if (r.state.find("MenuCamActor") == std::string::npos) {
+    if (!IsFixedCamera(r.state)) {
         return r.state;
     }
     if (const KnownCamera* camera = MatchCamera(r.location)) {
@@ -266,22 +271,25 @@ std::string MenuCam::NameOf(const CamReading& r) const {
 }
 
 void MenuCam::OnTick() {
-    if (lastWritten) {
-        CameraWrapper camera = gameWrapper->GetCamera();
-        if (!camera.IsNull()) {
-            if (SamePov(camera.GetPOV(), *lastWritten)) {
-                ++previewKept;
-            } else {
-                ++previewLost;
-            }
-        }
-    }
     auto r = Read();
     std::string key = r ? KeyOf(*r) + "|" + r->state : std::string();
     bool changed = false;
     {
         std::lock_guard guard(lock);
         current = r;
+        if (r && IsHomeCamera(r->state)) {
+            onScreen = kHomeKey;
+        } else if (r && IsFixedCamera(r->state)) {
+            // A camera blending in sits between spots; keep the last match
+            // until it settles on a known one.
+            if (const KnownCamera* known = MatchCamera(r->location)) {
+                onScreen = known->name;
+            } else if (onScreen == kHomeKey) {
+                onScreen.clear();
+            }
+        } else {
+            onScreen.clear();
+        }
         if (key != lastKey) {
             lastKey = key;
             changed = true;
@@ -292,62 +300,42 @@ void MenuCam::OnTick() {
     }
 }
 
-void MenuCam::OnCameraUpdated() {
+void MenuCam::ClearShake(CameraWrapper camera) {
+    if (!shakeSet) {
+        return;
+    }
+    camera.SetShakeLocationOffset(Vector{0, 0, 0});
+    camera.SetShakeRotationOffset(Rotator{0, 0, 0});
+    camera.SetShakeFOVOffset(0);
+    shakeSet = false;
+}
+
+void MenuCam::ApplyCameraOffsets() {
     CameraWrapper camera = gameWrapper->GetCamera();
     if (camera.IsNull()) {
         return;
     }
-    bool live = cvarManager->getCvar("menucam_live").getBoolValue();
-    int method = cvarManager->getCvar("menucam_method").getIntValue();
-    if (!live) {
-        if (shakeSet) {
-            camera.SetShakeLocationOffset(Vector{0, 0, 0});
-            camera.SetShakeRotationOffset(Rotator{0, 0, 0});
-            camera.SetShakeFOVOffset(0);
-            shakeSet = false;
+    CamOffsets use;
+    {
+        std::lock_guard guard(lock);
+        auto it = offsets.find(onScreen);
+        if (it != offsets.end()) {
+            use = it->second;
         }
-        lastBase.reset();
-        lastWritten.reset();
+    }
+    if (!use.on || !use.Changes()) {
+        ClearShake(camera);
         return;
     }
-    Vector move{cvarManager->getCvar("menucam_x").getFloatValue(),
-                cvarManager->getCvar("menucam_y").getFloatValue(),
-                cvarManager->getCvar("menucam_z").getFloatValue()};
-    Rotator turn{
-        static_cast<int>(std::lround(cvarManager->getCvar("menucam_pitch").getFloatValue() * kRotatorPerDegree)),
-        static_cast<int>(std::lround(cvarManager->getCvar("menucam_yaw").getFloatValue() * kRotatorPerDegree)),
-        0};
-    float fov = cvarManager->getCvar("menucam_fov").getFloatValue();
-
-    // Method 0: the camera's own shake offsets, which the game adds to the
-    // final view every frame. Method 1: overwrite the view after the game
-    // computed it.
-    if (method == 0) {
-        camera.SetbDisableCameraShake(0);
-        camera.SetShakeLocationOffset(move);
-        camera.SetShakeRotationOffset(turn);
-        float base = camera.GetPOV().FOV - camera.GetShakeFOVOffset();
-        camera.SetShakeFOVOffset(fov >= 10 ? fov - base : 0);
-        shakeSet = true;
-        return;
-    }
-    if (shakeSet) {
-        camera.SetShakeLocationOffset(Vector{0, 0, 0});
-        camera.SetShakeRotationOffset(Rotator{0, 0, 0});
-        camera.SetShakeFOVOffset(0);
-        shakeSet = false;
-    }
-    POV pov = camera.GetPOV();
-    POV base = (lastWritten && lastBase && SamePov(pov, *lastWritten)) ? *lastBase : pov;
-    POV out = base;
-    out.location = out.location + move;
-    out.rotation = out.rotation + turn;
-    if (fov >= 10) {
-        out.FOV = fov;
-    }
-    camera.SetPOV(out);
-    lastBase = base;
-    lastWritten = camera.GetPOV();
+    // The camera's own shake offsets, which the game adds to the final view
+    // every frame. Overwriting the view itself doesn't stick in the menus.
+    camera.SetbDisableCameraShake(0);
+    camera.SetShakeLocationOffset(Vector{use.x, use.y, use.z});
+    camera.SetShakeRotationOffset(Rotator{static_cast<int>(std::lround(use.pitch * kRotatorPerDegree)),
+                                          static_cast<int>(std::lround(use.yaw * kRotatorPerDegree)), 0});
+    float base = camera.GetPOV().FOV - camera.GetShakeFOVOffset();
+    camera.SetShakeFOVOffset(use.fov >= 10 ? use.fov - base : 0);
+    shakeSet = true;
 }
 
 void MenuCam::OnCarTick(ActorWrapper car) {
@@ -355,7 +343,7 @@ void MenuCam::OnCarTick(ActorWrapper car) {
         return;
     }
     CarSpot& spot = cars[car.memory_address];
-    spot.lastSeen = hookFires[kHookCount];
+    spot.lastSeen = frame;
     Vector at = car.GetLocation();
     Rotator rotation = car.GetRotation();
     // Anything other than our last write is the game placing the car.
@@ -398,8 +386,6 @@ void MenuCam::OnCarTick(ActorWrapper car) {
 }
 
 void MenuCam::PickPivotCar() {
-    bool live = cvarManager->getCvar("menucam_car_live").getBoolValue();
-    int frame = hookFires[kHookCount];
     // Forget cars that stopped running (left the menu, or a party member left).
     for (auto it = cars.begin(); it != cars.end();) {
         if (frame - it->second.lastSeen > 300) {
@@ -409,29 +395,33 @@ void MenuCam::PickPivotCar() {
         }
     }
     carCount = static_cast<int>(cars.size());
-    if (!live) {
+    if (!cvarManager->getCvar("menucam_car_live").getBoolValue()) {
         pivotCar = 0;
         return;
     }
     if (pivotCar && cars.count(pivotCar)) {
         return;
     }
-    CameraWrapper camera = gameWrapper->GetCamera();
-    if (camera.IsNull() || cars.empty()) {
+    for (const auto& [address, spot] : cars) {
+        if (std::abs(spot.base.X - kPlayerCarSpot.X) < 2 && std::abs(spot.base.Y - kPlayerCarSpot.Y) < 2 &&
+            std::abs(spot.base.Z - kPlayerCarSpot.Z) < 2) {
+            pivotCar = address;
+            return;
+        }
+    }
+    // Not the stored spot (another game build): the home camera orbits the
+    // player's car and looks at it, so pick the car closest to the line of
+    // sight.
+    auto r = Read();
+    if (!r || cars.empty()) {
         return;
     }
-    // The home camera orbits the player's car and looks at it, so pick the
-    // car closest to the line of sight.
-    POV pov = camera.GetPOV();
-    if (lastWritten && lastBase && SamePov(pov, *lastWritten)) {
-        pov = *lastBase;
-    }
-    float pitch = pov.rotation.Pitch / kRotatorPerDegree * 3.14159265f / 180.0f;
-    float turn = pov.rotation.Yaw / kRotatorPerDegree * 3.14159265f / 180.0f;
+    float pitch = Degrees(r->rotation.Pitch) * 3.14159265f / 180.0f;
+    float turn = Degrees(r->rotation.Yaw) * 3.14159265f / 180.0f;
     Vector look{std::cos(pitch) * std::cos(turn), std::cos(pitch) * std::sin(turn), std::sin(pitch)};
     float best = 0;
     for (const auto& [address, spot] : cars) {
-        Vector to{spot.base.X - pov.location.X, spot.base.Y - pov.location.Y, spot.base.Z - pov.location.Z};
+        Vector to{spot.base.X - r->location.X, spot.base.Y - r->location.Y, spot.base.Z - r->location.Z};
         float along = to.X * look.X + to.Y * look.Y + to.Z * look.Z;
         float length2 = to.X * to.X + to.Y * to.Y + to.Z * to.Z;
         float off = length2 - along * along;
@@ -442,20 +432,104 @@ void MenuCam::PickPivotCar() {
     }
 }
 
+void MenuCam::ExportForHebnix() {
+    auto value = [this](const char* name) { return cvarManager->getCvar(name).getFloatValue(); };
+    std::ostringstream json;
+    json << std::fixed << std::setprecision(1) << "{\n";
+    bool hasCar = value("menucam_car_x") != 0 || value("menucam_car_y") != 0 || value("menucam_car_z") != 0 ||
+                  value("menucam_car_yaw") != 0;
+    if (hasCar) {
+        json << "  \"car\": {\"offset\": [" << value("menucam_car_x") << ", " << value("menucam_car_y") << ", "
+             << value("menucam_car_z") << "], \"yaw\": " << value("menucam_car_yaw") << "}";
+    }
+    std::map<std::string, CamOffsets> saved;
+    {
+        std::lock_guard guard(lock);
+        saved = offsets;
+    }
+    // Only fixed cameras from the menu file can go to Hebnix.
+    std::vector<std::string> exported;
+    for (const auto& [key, use] : saved) {
+        if (key == kHomeKey || !use.on || !use.Changes()) {
+            continue;
+        }
+        json << (hasCar || !exported.empty() ? ",\n" : "") << (exported.empty() ? "  \"cameras\": [\n" : "")
+             << "    {\"camera\": " << JsonString(key) << ", \"offset\": [" << use.x << ", " << use.y << ", "
+             << use.z << "], \"pitch\": " << use.pitch << ", \"yaw\": " << use.yaw << ", \"fov\": ";
+        if (use.fov >= 10) {
+            json << use.fov;
+        } else {
+            json << "null";
+        }
+        json << "}";
+        exported.push_back(CameraLabel(key));
+    }
+    if (!exported.empty()) {
+        json << "\n  ]";
+    }
+    json << "\n}\n";
+    std::string status;
+    if (!hasCar && exported.empty()) {
+        status = "Nothing to export: move the car, or turn on offsets for a fixed menu camera, first.";
+    } else {
+        std::ofstream(dir / "hebnix.json", std::ios::trunc) << json.str();
+        std::string what = hasCar ? "the car position" : "";
+        for (const auto& label : exported) {
+            what += (what.empty() ? "" : ", ") + label;
+        }
+        status = "Saved " + what + ". In Hebnix, press Import MenuCam values on the Menu Map page.";
+    }
+    {
+        std::lock_guard guard(lock);
+        exportStatus = status;
+    }
+    cvarManager->log("menucam: " + status);
+}
+
+void MenuCam::LoadOffsets() {
+    std::ifstream in(dir / "cameras.txt");
+    std::string key;
+    CamOffsets use;
+    while (in >> key >> use.on >> use.x >> use.y >> use.z >> use.pitch >> use.yaw >> use.fov) {
+        offsets[key] = use;
+    }
+}
+
+void MenuCam::SaveOffsets() {
+    std::map<std::string, CamOffsets> saved;
+    {
+        std::lock_guard guard(lock);
+        if (!offsetsDirty) {
+            return;
+        }
+        offsetsDirty = false;
+        saved = offsets;
+    }
+    std::ofstream out(dir / "cameras.txt", std::ios::trunc);
+    out << std::setprecision(9);
+    for (const auto& [key, use] : saved) {
+        out << key << " " << use.on << " " << use.x << " " << use.y << " " << use.z << " " << use.pitch << " "
+            << use.yaw << " " << use.fov << "\n";
+    }
+}
+
 void MenuCam::WriteDiagnostics() {
     CameraWrapper camera = gameWrapper->GetCamera();
-    std::ofstream out(dir / "preview-check.txt", std::ios::trunc);
-    out << std::fixed << std::setprecision(1) << Timestamp() << "\n";
-    out << "live=" << cvarManager->getCvar("menucam_live").getBoolValue()
-        << " method=" << cvarManager->getCvar("menucam_method").getIntValue()
-        << " move=" << cvarManager->getCvar("menucam_x").getFloatValue() << ","
-        << cvarManager->getCvar("menucam_y").getFloatValue() << ","
-        << cvarManager->getCvar("menucam_z").getFloatValue() << "\n";
-    for (size_t i = 0; i < kHookCount; ++i) {
-        out << hookFires[i] << "\t" << kUpdateHooks[i] << "\n";
+    std::string screen;
+    CamOffsets use;
+    {
+        std::lock_guard guard(lock);
+        screen = onScreen;
+        auto it = offsets.find(onScreen);
+        if (it != offsets.end()) {
+            use = it->second;
+        }
     }
-    out << hookFires[kHookCount] << "\tviewport tick\n";
-    out << "SetPOV kept=" << previewKept << " overwritten=" << previewLost << "\n";
+    std::ofstream out(dir / "preview-check.txt", std::ios::trunc);
+    out << std::fixed << std::setprecision(1) << Timestamp() << "  frame " << frame << "\n";
+    out << "on screen=" << (screen.empty() ? "(none)" : screen) << " offsets on=" << use.on << " move=" << use.x
+        << "," << use.y << "," << use.z << " tilt=" << use.pitch << " turn=" << use.yaw << " fov=" << use.fov
+        << "\n";
     out << "car live=" << cvarManager->getCvar("menucam_car_live").getBoolValue()
         << " move=" << cvarManager->getCvar("menucam_car_x").getFloatValue() << ","
         << cvarManager->getCvar("menucam_car_y").getFloatValue() << ","
@@ -476,8 +550,6 @@ void MenuCam::WriteDiagnostics() {
         out << "pov=" << pov.location.X << "," << pov.location.Y << "," << pov.location.Z
             << " rot=" << Degrees(pov.rotation.Pitch) << "," << Degrees(pov.rotation.Yaw)
             << " fov=" << pov.FOV << "\n";
-        out << "camera actor location=" << camera.GetLocation().X << "," << camera.GetLocation().Y
-            << "," << camera.GetLocation().Z << "\n";
         out << "shake=" << shake.X << "," << shake.Y << "," << shake.Z
             << " shakeFov=" << camera.GetShakeFOVOffset()
             << " shakeDisabled=" << camera.GetbDisableCameraShake() << "\n";
@@ -582,13 +654,48 @@ void MenuCam::SetImGuiContext(uintptr_t ctx) {
     ImGui::SetCurrentContext(reinterpret_cast<ImGuiContext*>(ctx));
 }
 
+void MenuCam::RenderCameraTab(const std::string& key, const char* note) {
+    CamOffsets use;
+    bool showing;
+    {
+        std::lock_guard guard(lock);
+        auto it = offsets.find(key);
+        if (it != offsets.end()) {
+            use = it->second;
+        }
+        showing = onScreen == key;
+    }
+    ImGui::PushID(key.c_str());
+    ImGui::TextDisabled(showing ? "On screen now." : "Not on screen. Changes show when it is.");
+    bool changed = ImGui::Checkbox("Use these offsets", &use.on);
+    changed |= SliderRow("x", "Move X", &use.x, -kMaxMove, kMaxMove, kMovePower);
+    changed |= SliderRow("y", "Move Y", &use.y, -kMaxMove, kMaxMove, kMovePower);
+    changed |= SliderRow("z", "Move Z", &use.z, -kMaxMove, kMaxMove, kMovePower);
+    changed |= SliderRow("pitch", "Tilt", &use.pitch, -89, 89);
+    changed |= SliderRow("yaw", "Turn", &use.yaw, -180, 180);
+    changed |= SliderRow("fov", "FOV (0 = game's)", &use.fov, 0, 170);
+    if (ImGui::Button("Reset")) {
+        use = CamOffsets{use.on};
+        changed = true;
+    }
+    ImGui::TextWrapped("%s", note);
+    ImGui::PopID();
+    if (changed) {
+        std::lock_guard guard(lock);
+        offsets[key] = use;
+        offsetsDirty = true;
+    }
+}
+
 void MenuCam::RenderSettings() {
     std::optional<CamReading> r;
     std::string name;
+    std::string screen;
     std::map<std::string, std::string> saved;
     {
         std::lock_guard guard(lock);
         r = current;
+        screen = onScreen;
         saved = names;
         if (r) {
             auto it = names.find(KeyOf(*r));
@@ -632,54 +739,59 @@ void MenuCam::RenderSettings() {
         overlay.setValue(showOverlay);
     }
 
-    if (ImGui::CollapsingHeader("Live preview (optional)")) {
-        ImGui::TextWrapped("Moves whatever camera is showing, only until you turn it off. "
-                           "Copy numbers you like into Hebnix's Menu Map page.");
-        auto live = cvarManager->getCvar("menucam_live");
-        bool liveOn = live.getBoolValue();
-        if (ImGui::Checkbox("Preview on", &liveOn)) {
-            live.setValue(liveOn);
+    if (ImGui::CollapsingHeader("Camera offsets", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::TextWrapped("Each camera keeps its own offsets. They apply whenever that camera is on "
+                           "screen, and are saved for next time.");
+        if (screen == kHomeKey) {
+            ImGui::TextUnformatted("On screen: the home screen camera.");
+        } else if (!screen.empty()) {
+            ImGui::Text("On screen: %s", CameraLabel(screen).c_str());
+        } else {
+            ImGui::TextUnformatted("On screen: a camera without offsets (gameplay, replays and so on).");
         }
-        auto methodCvar = cvarManager->getCvar("menucam_method");
-        int method = methodCvar.getIntValue();
-        ImGui::SameLine();
-        if (ImGui::RadioButton("Method A", method == 0)) {
-            methodCvar.setValue(0);
+        if (!screen.empty()) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Open its tab")) {
+                selectTab = screen;
+            }
         }
-        ImGui::SameLine();
-        if (ImGui::RadioButton("Method B", method == 1)) {
-            methodCvar.setValue(1);
-        }
-        const Slider sliders[] = {
-            {"menucam_x", "Move X", -kMaxMove, kMaxMove, kMovePower},
-            {"menucam_y", "Move Y", -kMaxMove, kMaxMove, kMovePower},
-            {"menucam_z", "Move Z", -kMaxMove, kMaxMove, kMovePower},
-            {"menucam_pitch", "Tilt", -89, 89},
-            {"menucam_yaw", "Turn", -180, 180},
-            {"menucam_fov", "FOV (0 = game's)", 0, 170},
+        const char* fixedNote = "Export for Hebnix includes this camera when its offsets are on.";
+        auto tabFlags = [this](const std::string& key) {
+            return selectTab == key ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None;
         };
-        for (const auto& slider : sliders) {
-            SliderRow(cvarManager->getCvar(slider.cvar), slider);
-        }
-        if (ImGui::Button("Reset")) {
-            for (const auto& slider : sliders) {
-                cvarManager->getCvar(slider.cvar).setValue(0.0f);
+        if (ImGui::BeginTabBar("cameras")) {
+            if (ImGui::BeginTabItem("Home screen", nullptr, tabFlags(kHomeKey))) {
+                RenderCameraTab(kHomeKey, "The camera that orbits your car. Hebnix can't change this one, so "
+                                          "these offsets only work with this plugin loaded.");
+                ImGui::EndTabItem();
             }
-        }
-        if (ImGui::TreeNode("Preview check")) {
-            for (size_t i = 0; i < kCarHookCount; ++i) {
-                ImGui::Text("%8d  %s", carHookFires[i], kCarHooks[i]);
+            if (ImGui::BeginTabItem("Play menu", nullptr, tabFlags(kPlayMenuCamera))) {
+                RenderCameraTab(kPlayMenuCamera, fixedNote);
+                ImGui::EndTabItem();
             }
-            ImGui::TextWrapped("With Preview on and a slider moved, these show where the plugin "
-                               "gets to move the camera. Screenshot this if the camera doesn't move.");
-            for (size_t i = 0; i < kHookCount; ++i) {
-                ImGui::Text("%8d  %s", hookFires[i], kUpdateHooks[i]);
+            bool other = !selectTab.empty() && selectTab != kHomeKey && selectTab != kPlayMenuCamera;
+            if (other) {
+                otherCamera = selectTab;
             }
-            ImGui::Text("%8d  viewport tick", hookFires[kHookCount]);
-            ImGui::Text("Preview kept %d times, overwritten by the game %d times", previewKept.load(),
-                        previewLost.load());
-            ImGui::TreePop();
+            if (ImGui::BeginTabItem("Other cameras", nullptr,
+                                    other ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None)) {
+                if (ImGui::BeginCombo("Camera", CameraLabel(otherCamera).c_str())) {
+                    for (const auto& camera : kKnownCameras) {
+                        if (camera.name == std::string(kPlayMenuCamera)) {
+                            continue;
+                        }
+                        if (ImGui::Selectable(CameraLabel(camera.name).c_str(), otherCamera == camera.name)) {
+                            otherCamera = camera.name;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                RenderCameraTab(otherCamera, fixedNote);
+                ImGui::EndTabItem();
+            }
+            ImGui::EndTabBar();
         }
+        selectTab.clear();
     }
 
     if (ImGui::CollapsingHeader("Car position (live preview)")) {
@@ -691,14 +803,25 @@ void MenuCam::RenderSettings() {
         if (ImGui::Checkbox("Move the cars", &liveOn)) {
             live.setValue(liveOn);
         }
-        const Slider sliders[] = {
+        struct CarSlider {
+            const char* cvar;
+            const char* label;
+            float min;
+            float max;
+            float power;
+        };
+        const CarSlider sliders[] = {
             {"menucam_car_x", "Car X", -kMaxMove, kMaxMove, kMovePower},
             {"menucam_car_y", "Car Y", -kMaxMove, kMaxMove, kMovePower},
             {"menucam_car_z", "Car Z", -kMaxMove, kMaxMove, kMovePower},
-            {"menucam_car_yaw", "Car turn", -180, 180},
+            {"menucam_car_yaw", "Car turn", -180, 180, 1.0f},
         };
         for (const auto& slider : sliders) {
-            SliderRow(cvarManager->getCvar(slider.cvar), slider);
+            auto cvar = cvarManager->getCvar(slider.cvar);
+            float value = cvar.getFloatValue();
+            if (SliderRow(slider.cvar, slider.label, &value, slider.min, slider.max, slider.power)) {
+                cvar.setValue(value);
+            }
         }
         if (ImGui::Button("Reset car")) {
             for (const auto& slider : sliders) {
@@ -706,5 +829,22 @@ void MenuCam::RenderSettings() {
             }
         }
         ImGui::Text("Cars found: %d", carCount.load());
+    }
+
+    if (ImGui::CollapsingHeader("Send to Hebnix")) {
+        ImGui::TextWrapped("Saves the car position, and the offsets of every fixed camera that has them "
+                           "on, to data/menucam/hebnix.json. Then press Import MenuCam values on "
+                           "Hebnix's Menu Map page.");
+        if (ImGui::Button("Export for Hebnix")) {
+            gameWrapper->Execute([this](GameWrapper*) { ExportForHebnix(); });
+        }
+        std::string status;
+        {
+            std::lock_guard guard(lock);
+            status = exportStatus;
+        }
+        if (!status.empty()) {
+            ImGui::TextWrapped("%s", status.c_str());
+        }
     }
 }
