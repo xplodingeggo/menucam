@@ -92,6 +92,39 @@ const KnownCamera* MatchCamera(const Vector& at) {
     return nullptr;
 }
 
+// A live preview value: a slider, plus a box for typing an exact number. The
+// box accepts values past the slider's range.
+struct Slider {
+    const char* cvar;
+    const char* label;
+    float min;
+    float max;
+    // Above 1, the slider is finer near zero so small moves stay easy on a
+    // big range.
+    float power = 1.0f;
+};
+
+// Distances reach the far ends of big custom maps.
+constexpr float kMaxMove = 100000.0f;
+constexpr float kMovePower = 4.0f;
+
+void SliderRow(CVarWrapper cvar, const Slider& slider) {
+    float value = cvar.getFloatValue();
+    float width = ImGui::GetContentRegionAvail().x;
+    ImGui::PushID(slider.cvar);
+    ImGui::SetNextItemWidth(width * 0.55f);
+    bool changed = ImGui::SliderFloat("##slider", &value, slider.min, slider.max, "%.1f", slider.power);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(width * 0.2f);
+    changed |= ImGui::InputFloat("##box", &value, 0.0f, 0.0f, "%.1f");
+    ImGui::SameLine();
+    ImGui::TextUnformatted(slider.label);
+    ImGui::PopID();
+    if (changed) {
+        cvar.setValue(value);
+    }
+}
+
 std::string Timestamp() {
     auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     std::tm tm{};
@@ -617,26 +650,16 @@ void MenuCam::RenderSettings() {
         if (ImGui::RadioButton("Method B", method == 1)) {
             methodCvar.setValue(1);
         }
-        struct Slider {
-            const char* cvar;
-            const char* label;
-            float min;
-            float max;
-        };
         const Slider sliders[] = {
-            {"menucam_x", "Move X", -5000, 5000},
-            {"menucam_y", "Move Y", -5000, 5000},
-            {"menucam_z", "Move Z", -2000, 5000},
+            {"menucam_x", "Move X", -kMaxMove, kMaxMove, kMovePower},
+            {"menucam_y", "Move Y", -kMaxMove, kMaxMove, kMovePower},
+            {"menucam_z", "Move Z", -kMaxMove, kMaxMove, kMovePower},
             {"menucam_pitch", "Tilt", -89, 89},
             {"menucam_yaw", "Turn", -180, 180},
             {"menucam_fov", "FOV (0 = game's)", 0, 170},
         };
         for (const auto& slider : sliders) {
-            auto cvar = cvarManager->getCvar(slider.cvar);
-            float value = cvar.getFloatValue();
-            if (ImGui::SliderFloat(slider.label, &value, slider.min, slider.max, "%.1f")) {
-                cvar.setValue(value);
-            }
+            SliderRow(cvarManager->getCvar(slider.cvar), slider);
         }
         if (ImGui::Button("Reset")) {
             for (const auto& slider : sliders) {
@@ -668,24 +691,14 @@ void MenuCam::RenderSettings() {
         if (ImGui::Checkbox("Move the cars", &liveOn)) {
             live.setValue(liveOn);
         }
-        struct Slider {
-            const char* cvar;
-            const char* label;
-            float min;
-            float max;
-        };
         const Slider sliders[] = {
-            {"menucam_car_x", "Car X", -5000, 5000},
-            {"menucam_car_y", "Car Y", -5000, 5000},
-            {"menucam_car_z", "Car Z", -2000, 2000},
+            {"menucam_car_x", "Car X", -kMaxMove, kMaxMove, kMovePower},
+            {"menucam_car_y", "Car Y", -kMaxMove, kMaxMove, kMovePower},
+            {"menucam_car_z", "Car Z", -kMaxMove, kMaxMove, kMovePower},
             {"menucam_car_yaw", "Car turn", -180, 180},
         };
         for (const auto& slider : sliders) {
-            auto cvar = cvarManager->getCvar(slider.cvar);
-            float value = cvar.getFloatValue();
-            if (ImGui::SliderFloat(slider.label, &value, slider.min, slider.max, "%.1f")) {
-                cvar.setValue(value);
-            }
+            SliderRow(cvarManager->getCvar(slider.cvar), slider);
         }
         if (ImGui::Button("Reset car")) {
             for (const auto& slider : sliders) {
