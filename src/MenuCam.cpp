@@ -9,7 +9,7 @@
 #include <iomanip>
 #include <sstream>
 
-BAKKESMOD_PLUGIN(MenuCam, "Menu Camera Logger", "1.2", PLUGINTYPE_FREEPLAY)
+BAKKESMOD_PLUGIN(MenuCam, "Menu Camera Logger", "1.1", PLUGINTYPE_FREEPLAY)
 
 namespace {
 
