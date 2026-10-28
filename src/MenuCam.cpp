@@ -113,6 +113,9 @@ const KnownCamera* FindCamera(const std::string& name) {
 
 // "CameraActor_3 (GoalExplosionRevealEnd)", or just the name when untagged.
 std::string CameraLabel(const std::string& name) {
+    if (name == kHomeKey) {
+        return "Home screen (car orbit camera)";
+    }
     const KnownCamera* camera = FindCamera(name);
     return camera && *camera->tag ? name + " (" + camera->tag + ")" : name;
 }
@@ -761,22 +764,58 @@ void MenuCam::RenderSettings() {
             return selectTab == key ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None;
         };
         if (ImGui::BeginTabBar("cameras")) {
-            if (ImGui::BeginTabItem("Home screen", nullptr, tabFlags(kHomeKey))) {
-                RenderCameraTab(kHomeKey, "The camera that orbits your car. Hebnix can't change this one, so "
-                                          "these offsets only work with this plugin loaded.");
+            if (ImGui::BeginTabItem("Car position")) {
+                ImGui::TextWrapped("Moves the cars on the home screen, only until you turn it off. The home "
+                                   "camera follows your car. Party cars turn with yours. These are the same "
+                                   "numbers as Car position on Hebnix's Menu Map page.");
+                auto live = cvarManager->getCvar("menucam_car_live");
+                bool liveOn = live.getBoolValue();
+                if (ImGui::Checkbox("Move the cars", &liveOn)) {
+                    live.setValue(liveOn);
+                }
+                struct CarSlider {
+                    const char* cvar;
+                    const char* label;
+                    float min;
+                    float max;
+                    float power;
+                };
+                const CarSlider sliders[] = {
+                    {"menucam_car_x", "Car X", -kMaxMove, kMaxMove, kMovePower},
+                    {"menucam_car_y", "Car Y", -kMaxMove, kMaxMove, kMovePower},
+                    {"menucam_car_z", "Car Z", -kMaxMove, kMaxMove, kMovePower},
+                    {"menucam_car_yaw", "Car turn", -180, 180, 1.0f},
+                };
+                for (const auto& slider : sliders) {
+                    auto cvar = cvarManager->getCvar(slider.cvar);
+                    float value = cvar.getFloatValue();
+                    if (SliderRow(slider.cvar, slider.label, &value, slider.min, slider.max, slider.power)) {
+                        cvar.setValue(value);
+                    }
+                }
+                if (ImGui::Button("Reset car")) {
+                    for (const auto& slider : sliders) {
+                        cvarManager->getCvar(slider.cvar).setValue(0.0f);
+                    }
+                }
+                ImGui::Text("Cars found: %d", carCount.load());
+    
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("Play menu", nullptr, tabFlags(kPlayMenuCamera))) {
                 RenderCameraTab(kPlayMenuCamera, fixedNote);
                 ImGui::EndTabItem();
             }
-            bool other = !selectTab.empty() && selectTab != kHomeKey && selectTab != kPlayMenuCamera;
+            bool other = !selectTab.empty() && selectTab != kPlayMenuCamera;
             if (other) {
                 otherCamera = selectTab;
             }
             if (ImGui::BeginTabItem("Other cameras", nullptr,
                                     other ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None)) {
                 if (ImGui::BeginCombo("Camera", CameraLabel(otherCamera).c_str())) {
+                    if (ImGui::Selectable(CameraLabel(kHomeKey).c_str(), otherCamera == kHomeKey)) {
+                        otherCamera = kHomeKey;
+                    }
                     for (const auto& camera : kKnownCameras) {
                         if (camera.name == std::string(kPlayMenuCamera)) {
                             continue;
@@ -787,49 +826,15 @@ void MenuCam::RenderSettings() {
                     }
                     ImGui::EndCombo();
                 }
-                RenderCameraTab(otherCamera, fixedNote);
+                RenderCameraTab(otherCamera, otherCamera == kHomeKey
+                                                 ? "The camera that orbits your car. Hebnix can't change this one, "
+                                                   "so these offsets only work with this plugin loaded."
+                                                 : fixedNote);
                 ImGui::EndTabItem();
             }
             ImGui::EndTabBar();
         }
         selectTab.clear();
-    }
-
-    if (ImGui::CollapsingHeader("Car position (live preview)")) {
-        ImGui::TextWrapped("Moves the cars on the home screen, only until you turn it off. The home "
-                           "camera follows your car. Party cars turn with yours. These are the same "
-                           "numbers as Car position on Hebnix's Menu Map page.");
-        auto live = cvarManager->getCvar("menucam_car_live");
-        bool liveOn = live.getBoolValue();
-        if (ImGui::Checkbox("Move the cars", &liveOn)) {
-            live.setValue(liveOn);
-        }
-        struct CarSlider {
-            const char* cvar;
-            const char* label;
-            float min;
-            float max;
-            float power;
-        };
-        const CarSlider sliders[] = {
-            {"menucam_car_x", "Car X", -kMaxMove, kMaxMove, kMovePower},
-            {"menucam_car_y", "Car Y", -kMaxMove, kMaxMove, kMovePower},
-            {"menucam_car_z", "Car Z", -kMaxMove, kMaxMove, kMovePower},
-            {"menucam_car_yaw", "Car turn", -180, 180, 1.0f},
-        };
-        for (const auto& slider : sliders) {
-            auto cvar = cvarManager->getCvar(slider.cvar);
-            float value = cvar.getFloatValue();
-            if (SliderRow(slider.cvar, slider.label, &value, slider.min, slider.max, slider.power)) {
-                cvar.setValue(value);
-            }
-        }
-        if (ImGui::Button("Reset car")) {
-            for (const auto& slider : sliders) {
-                cvarManager->getCvar(slider.cvar).setValue(0.0f);
-            }
-        }
-        ImGui::Text("Cars found: %d", carCount.load());
     }
 
     if (ImGui::CollapsingHeader("Send to Hebnix")) {
