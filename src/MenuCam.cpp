@@ -46,7 +46,8 @@ bool IsHomeCamera(const std::string& state) {
 }
 
 bool IsFixedCamera(const std::string& state) {
-    return state.find("MenuCamActor") != std::string::npos;
+    // "MenuCamActor" states and the press-any-button screen's CamActor_X.
+    return state.find("CamActor") != std::string::npos;
 }
 
 std::string JsonString(const std::string& text) {
@@ -83,7 +84,7 @@ const KnownCamera kKnownCameras[] = {
     {"CameraActor_9", "AnthemCam", 40.8f, 2654.4f, 77.6f},
     {"CameraActor_10", "", 568.8f, -705.6f, 54.0f},
     {"CameraActor_1", "", -2342.9f, -1086.4f, 132.0f},
-    {"CameraActor_8", "", 1321.5f, -1294.7f, 215.8f},
+    {"CameraActor_8", "PressAnyButtonToStart", 1321.5f, -1294.7f, 215.8f},
     {"CameraActor_13", "", -2347.4f, 1265.7f, 1181.1f},
     {"CameraActor_11", "", 840.8f, -1057.6f, 77.6f},
     {"CameraActor_12", "", -1320.8f, 337.6f, 77.6f},
@@ -183,7 +184,7 @@ void MenuCam::onLoad() {
         SaveName(label);
     }, "Give the current camera a name: menucam_name Home screen", PERMISSION_ALL);
 
-    cvarManager->registerNotifier("menucam_export", [this](std::vector<std::string>) { ExportForHebnix(); },
+    cvarManager->registerNotifier("menucam_export",[this](std::vector<std::string>) { ExportForHebnix(); },
                                   "Save the car and fixed camera offsets for Hebnix's Import MenuCam values button",
                                   PERMISSION_ALL);
 
