@@ -166,6 +166,8 @@ void MenuCam::onLoad() {
     }
     cvarManager->registerCvar("menucam_car_yaw", "0", "Car turn (degrees)", true, true, -180, true, 180, false);
 
+    LoadCar();
+
     cvarManager->registerNotifier("menucam_mark", [this](std::vector<std::string> args) {
         std::string note;
         for (size_t i = 1; i < args.size(); ++i) {
@@ -199,6 +201,7 @@ void MenuCam::onLoad() {
         if (frame % 120 == 0) {
             WriteDiagnostics();
             SaveOffsets();
+            SaveCar();
         }
     });
     gameWrapper->HookEventPost(kHomeCameraHook, [this](std::string) { ApplyCameraOffsets(); });
@@ -225,6 +228,7 @@ void MenuCam::onUnload() {
         ClearShake(camera);
     }
     SaveOffsets();
+    SaveCar();
 }
 
 std::optional<CamReading> MenuCam::Read() {
@@ -515,6 +519,35 @@ void MenuCam::SaveOffsets() {
         out << key << " " << use.on << " " << use.x << " " << use.y << " " << use.z << " " << use.pitch << " "
             << use.yaw << " " << use.fov << "\n";
     }
+}
+
+// The car position (move x, y, z and turn) stays on after a restart.
+const char* const kCarCvars[] = {"menucam_car_x", "menucam_car_y", "menucam_car_z", "menucam_car_yaw"};
+
+void MenuCam::LoadCar() {
+    std::ifstream in(dir / "car.txt");
+    for (size_t i = 0; i < carSaved.size(); ++i) {
+        if (!(in >> carSaved[i])) {
+            carSaved.fill(0);
+            return;
+        }
+    }
+    for (size_t i = 0; i < carSaved.size(); ++i) {
+        cvarManager->getCvar(kCarCvars[i]).setValue(carSaved[i]);
+    }
+}
+
+void MenuCam::SaveCar() {
+    std::array<float, 4> now;
+    for (size_t i = 0; i < now.size(); ++i) {
+        now[i] = cvarManager->getCvar(kCarCvars[i]).getFloatValue();
+    }
+    if (now == carSaved) {
+        return;
+    }
+    carSaved = now;
+    std::ofstream out(dir / "car.txt", std::ios::trunc);
+    out << std::setprecision(9) << now[0] << " " << now[1] << " " << now[2] << " " << now[3] << "\n";
 }
 
 void MenuCam::WriteDiagnostics() {

@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <filesystem>
+#include <array>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -67,6 +68,8 @@ private:
     void WriteDiagnostics();
     void OnCarTick(ActorWrapper car);
     void PickPivotCar();
+    void LoadCar();
+    void SaveCar();
     void ExportForHebnix();
     void RenderCameraTab(const std::string& key, const char* note);
 
@@ -99,6 +102,7 @@ private:
     char nameBuffer[128] = {};
     // Settings window: the fixed camera picked on the Other cameras tab, and
     // a tab to bring to the front on the next frame.
+    std::array<float, 4> carSaved{};
     std::string otherCamera = "CameraActor_3";
     std::string selectTab;
 
